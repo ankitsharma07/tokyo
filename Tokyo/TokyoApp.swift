@@ -30,5 +30,10 @@ struct TokyoApp: App {
             ContentView()
         }
         .modelContainer(sharedModelContainer)
+
+        Settings {
+            AppSettingsView()
+        }
+        .modelContainer(sharedModelContainer)
     }
 }
