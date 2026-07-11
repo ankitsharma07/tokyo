@@ -10,10 +10,31 @@ import SwiftData
 
 struct NoteBodyEditor: View {
     @Bindable var note: Note
+    @Query(sort: \Note.title) private var notes: [Note]
     @State private var isPreviewExpanded = false
 
     private var shouldShowSlashCommands: Bool {
         !isPreviewExpanded && note.markupFormat == .markdown && note.body.hasSuffix("/")
+    }
+
+    private var linkSuggestionContext: NoteLinkSuggestionContext? {
+        guard !isPreviewExpanded, note.markupFormat == .markdown else { return nil }
+        return NoteLinkSuggestionContext(body: note.body)
+    }
+
+    private var linkSuggestions: [Note] {
+        guard let context = linkSuggestionContext else { return [] }
+        let query = context.query.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return notes
+            .filter { candidate in
+                candidate.id != note.id &&
+                candidate.vault?.id == note.vault?.id &&
+                !candidate.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                (query.isEmpty || candidate.title.localizedCaseInsensitiveContains(query))
+            }
+            .prefix(6)
+            .map { $0 }
     }
 
     var body: some View {
@@ -62,7 +83,20 @@ struct NoteBodyEditor: View {
                         .padding(.leading, 12)
                 }
             }
+            .overlay(alignment: .topLeading) {
+                if let context = linkSuggestionContext, !linkSuggestions.isEmpty {
+                    NoteLinkSuggestionMenu(suggestions: linkSuggestions) { selectedNote in
+                        applyLinkSuggestion(selectedNote, context: context)
+                    }
+                    .padding(.top, 32)
+                    .padding(.leading, 12)
+                }
+            }
             .padding(.top, 8)
+    }
+
+    private func applyLinkSuggestion(_ selectedNote: Note, context: NoteLinkSuggestionContext) {
+        note.body.replaceSubrange(context.replacementRange, with: "[[\(selectedNote.title)]]")
     }
 
     @ViewBuilder
@@ -102,6 +136,59 @@ private struct PaneHeader: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.quaternary.opacity(0.35))
+    }
+}
+
+private struct NoteLinkSuggestionMenu: View {
+    let suggestions: [Note]
+    let selection: (Note) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(suggestions) { note in
+                Button {
+                    selection(note)
+                } label: {
+                    Label(note.title, systemImage: "link")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+            }
+        }
+        .padding(6)
+        .frame(width: 260)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.separator.opacity(0.45))
+        }
+        .shadow(radius: 12, y: 4)
+    }
+}
+
+private struct NoteLinkSuggestionContext {
+    let query: String
+    let replacementRange: Range<String.Index>
+
+    init?(body: String) {
+        let searchRange: Range<String.Index>
+        if let lastClosedLink = body.range(of: "]]", options: .backwards) {
+            searchRange = lastClosedLink.upperBound..<body.endIndex
+        } else {
+            searchRange = body.startIndex..<body.endIndex
+        }
+
+        guard let openingRange = body.range(of: "[[", options: .backwards, range: searchRange) else { return nil }
+        let queryRange = openingRange.upperBound..<body.endIndex
+        let query = String(body[queryRange])
+
+        guard !query.contains("\n"), !query.contains("[") else { return nil }
+
+        self.query = query
+        self.replacementRange = openingRange.lowerBound..<body.endIndex
     }
 }
 

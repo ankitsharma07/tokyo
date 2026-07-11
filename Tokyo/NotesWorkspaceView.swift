@@ -14,6 +14,9 @@ struct NotesWorkspaceView: View {
     @Query(sort: \Note.updatedAt, order: .reverse) private var notes: [Note]
     @Query(sort: \NoteFolder.createdAt) private var folders: [NoteFolder]
     @State private var selectedNote: Note?
+    @State private var isShowingGraph = false
+    @State private var noteGraph = NoteGraph.empty
+    @State private var graphErrorMessage: String?
 
     private var vaultNotes: [Note] {
         notes.filter { $0.vault?.id == vault.id }
@@ -23,9 +26,23 @@ struct NotesWorkspaceView: View {
         folders.filter { $0.vault?.id == vault.id }
     }
 
+    private var graphIndexKey: String {
+        vaultNotes
+            .map { "\($0.id.uuidString)|\($0.title)|\($0.body)|\($0.updatedAt.timeIntervalSinceReferenceDate)" }
+            .joined(separator: "\n")
+    }
+
     var body: some View {
         NavigationSplitView {
             List(selection: $selectedNote) {
+                Section {
+                    Button {
+                        isShowingGraph = true
+                    } label: {
+                        Label("Graph", systemImage: "point.3.connected.trianglepath.dotted")
+                    }
+                }
+
                 if !vaultFolders.isEmpty {
                     Section("Folders") {
                         ForEach(vaultFolders) { folder in
@@ -57,9 +74,14 @@ struct NotesWorkspaceView: View {
             .navigationSplitViewColumnWidth(min: 220, ideal: 280)
             .toolbar {
                 ToolbarItem(placement: .principal) {
-                    VStack(spacing: 1) {
+                    VStack(spacing: 4) {
                         Text(vault.name)
                             .font(.headline)
+                            .lineLimit(1)
+                            .padding(.horizontal, 22)
+                            .padding(.vertical, 7)
+                            .background(.quaternary.opacity(0.6), in: Capsule())
+                            .fixedSize(horizontal: true, vertical: false)
                         if let description = vault.vaultDescription, !description.isEmpty {
                             Text(description)
                                 .font(.caption)
@@ -84,6 +106,14 @@ struct NotesWorkspaceView: View {
                 }
 
                 ToolbarItem {
+                    Button {
+                        isShowingGraph = true
+                    } label: {
+                        Label("Graph", systemImage: "point.3.connected.trianglepath.dotted")
+                    }
+                }
+
+                ToolbarItem {
                     Menu {
                         Picker("New Note Format", selection: Binding(
                             get: { vault.defaultNoteFormat },
@@ -102,12 +132,60 @@ struct NotesWorkspaceView: View {
                 }
             }
         } detail: {
-            if let selectedNote {
-                NoteDetailView(note: selectedNote)
-            } else {
-                ContentUnavailableView("Select a Note", systemImage: "note.text", description: Text("Choose a note from the sidebar or create a new one."))
+            VStack(spacing: 0) {
+                if let graphErrorMessage {
+                    Label(graphErrorMessage, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(.orange.opacity(0.12))
+                }
+
+                if isShowingGraph {
+                    NoteGraphView(graph: noteGraph, selectedNoteID: selectedNote?.id) { noteID in
+                        selectNote(withID: noteID)
+                    }
+                } else if let selectedNote {
+                    NoteDetailView(note: selectedNote)
+                } else {
+                    ContentUnavailableView("Select a Note", systemImage: "note.text", description: Text("Choose a note from the sidebar or create a new one."))
+                }
             }
         }
+        .task {
+            refreshGraphIndex()
+        }
+        .onChange(of: graphIndexKey) { _, _ in
+            refreshGraphIndex()
+        }
+        .onChange(of: selectedNote?.id) { _, newValue in
+            if newValue != nil {
+                isShowingGraph = false
+            }
+        }
+    }
+
+    private func refreshGraphIndex() {
+        switch NoteGraphStore.shared {
+        case .success(let store):
+            do {
+                try store.rebuildIndex(for: vaultNotes, vaultID: vault.id)
+                noteGraph = try store.graph(for: vault.id)
+                graphErrorMessage = nil
+            } catch {
+                graphErrorMessage = error.localizedDescription
+            }
+        case .failure(let error):
+            graphErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func selectNote(withID noteID: UUID) {
+        guard let note = vaultNotes.first(where: { $0.id == noteID }) else { return }
+        selectedNote = note
+        isShowingGraph = false
     }
 
     private func createNote() {
