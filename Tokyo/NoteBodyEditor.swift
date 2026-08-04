@@ -7,18 +7,20 @@
 
 import SwiftUI
 import SwiftData
+#if os(macOS)
+import AppKit
+#endif
 
 struct NoteBodyEditor: View {
     @Bindable var note: Note
     @Query(sort: \Note.title) private var notes: [Note]
-    @State private var isPreviewExpanded = false
 
     private var shouldShowSlashCommands: Bool {
-        !isPreviewExpanded && note.markupFormat == .markdown && note.body.hasSuffix("/")
+        note.markupFormat == .markdown && note.body.hasSuffix("/")
     }
 
     private var linkSuggestionContext: NoteLinkSuggestionContext? {
-        guard !isPreviewExpanded, note.markupFormat == .markdown else { return nil }
+        guard note.markupFormat == .markdown else { return nil }
         return NoteLinkSuggestionContext(body: note.body)
     }
 
@@ -38,106 +40,299 @@ struct NoteBodyEditor: View {
     }
 
     var body: some View {
-        Group {
-            if isPreviewExpanded {
-                VStack(spacing: 0) {
-                    PaneHeader(title: "Preview", systemImage: "doc.richtext", isPreviewExpanded: $isPreviewExpanded)
-                    preview
-                }
-            } else {
-                HSplitView {
-                    VStack(spacing: 0) {
-                        PaneHeader(title: "Editor", systemImage: "pencil.line", isPreviewExpanded: nil)
-                        editor
-                    }
-                    .frame(minWidth: 280)
-
-                    VStack(spacing: 0) {
-                        PaneHeader(title: "Preview", systemImage: "doc.richtext", isPreviewExpanded: $isPreviewExpanded)
-                        preview
-                    }
-                    .frame(minWidth: 280)
-                }
-            }
-        }
-        .animation(.default, value: isPreviewExpanded)
+        editor
     }
 
     private var editor: some View {
-        TextEditor(text: $note.body)
-            .font(.body.monospaced())
-            .scrollContentBackground(.hidden)
-            .overlay(alignment: .topLeading) {
-                if note.body.isEmpty {
-                    Text("Start writing...")
-                        .foregroundStyle(.tertiary)
-                        .padding(.top, 8)
-                        .padding(.leading, 5)
-                        .allowsHitTesting(false)
-                }
-            }
-            .overlay(alignment: .topLeading) {
-                if shouldShowSlashCommands {
-                    SlashCommandMenu(noteBody: $note.body)
-                        .padding(.top, 32)
-                        .padding(.leading, 12)
-                }
-            }
-            .overlay(alignment: .topLeading) {
-                if let context = linkSuggestionContext, !linkSuggestions.isEmpty {
-                    NoteLinkSuggestionMenu(suggestions: linkSuggestions) { selectedNote in
-                        applyLinkSuggestion(selectedNote, context: context)
-                    }
-                    .padding(.top, 32)
+        ZStack(alignment: .topLeading) {
+            bodyInput
+
+            if note.body.isEmpty {
+                Text("Start writing...")
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 16)
                     .padding(.leading, 12)
-                }
+                    .allowsHitTesting(false)
             }
-            .padding(.top, 8)
+        }
+        .overlay(alignment: .topLeading) {
+            if shouldShowSlashCommands {
+                SlashCommandMenu(noteBody: $note.body)
+                    .padding(.top, 40)
+                    .padding(.leading, 12)
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if let context = linkSuggestionContext, !linkSuggestions.isEmpty {
+                NoteLinkSuggestionMenu(suggestions: linkSuggestions) { selectedNote in
+                    applyLinkSuggestion(selectedNote, context: context)
+                }
+                .padding(.top, 40)
+                .padding(.leading, 12)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var bodyInput: some View {
+        switch note.markupFormat {
+        case .markdown:
+            MarkdownLiveTextEditor(text: $note.body)
+        case .org:
+            TextEditor(text: $note.body)
+                .font(.body.monospaced())
+                .scrollContentBackground(.hidden)
+                .padding(.top, 8)
+        }
     }
 
     private func applyLinkSuggestion(_ selectedNote: Note, context: NoteLinkSuggestionContext) {
         note.body.replaceSubrange(context.replacementRange, with: "[[\(selectedNote.title)]]")
     }
 
-    @ViewBuilder
-    private var preview: some View {
-        switch note.markupFormat {
-        case .markdown:
-            MarkdownPreviewView(markdown: note.body)
-        case .org:
-            PlainTextPreviewView(text: note.body)
-        }
-    }
 }
 
-private struct PaneHeader: View {
-    let title: String
-    let systemImage: String
-    let isPreviewExpanded: Binding<Bool>?
+#if os(macOS)
+private struct MarkdownLiveTextEditor: NSViewRepresentable {
+    @Binding var text: String
 
-    var body: some View {
-        HStack(spacing: 8) {
-            Label(title, systemImage: systemImage)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
 
-            Spacer()
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
 
-            if let isPreviewExpanded {
-                Button {
-                    isPreviewExpanded.wrappedValue.toggle()
-                } label: {
-                    Image(systemName: isPreviewExpanded.wrappedValue ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+        guard let textView = scrollView.documentView as? NSTextView else {
+            return scrollView
+        }
+
+        textView.delegate = context.coordinator
+        textView.string = text
+        textView.drawsBackground = false
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.textContainerInset = NSSize(width: 8, height: 12)
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: .greatestFiniteMagnitude)
+
+        context.coordinator.applyMarkdownStyle(to: textView)
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+
+        if textView.string != text {
+            context.coordinator.isUpdatingFromSwiftUI = true
+            textView.string = text
+            context.coordinator.isUpdatingFromSwiftUI = false
+        }
+
+        context.coordinator.applyMarkdownStyle(to: textView)
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        @Binding private var text: String
+        var isUpdatingFromSwiftUI = false
+        private var isApplyingStyle = false
+
+        init(text: Binding<String>) {
+            _text = text
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+
+            if !isUpdatingFromSwiftUI {
+                text = textView.string
+            }
+
+            applyMarkdownStyle(to: textView)
+        }
+
+        func applyMarkdownStyle(to textView: NSTextView) {
+            guard !isApplyingStyle, let storage = textView.textStorage else { return }
+
+            isApplyingStyle = true
+            let selectedRanges = textView.selectedRanges
+            let fullRange = NSRange(location: 0, length: storage.length)
+            let source = textView.string as NSString
+
+            storage.beginEditing()
+            storage.setAttributes(baseAttributes(), range: fullRange)
+
+            var isInCodeBlock = false
+            source.enumerateSubstrings(in: fullRange, options: [.byLines, .substringNotRequired]) { _, lineRange, _, _ in
+                let line = source.substring(with: lineRange)
+                let trimmedLine = line.trimmingCharacters(in: .whitespaces)
+
+                if trimmedLine.hasPrefix("```") {
+                    storage.addAttributes(self.codeAttributes(), range: lineRange)
+                    isInCodeBlock.toggle()
+                    return
                 }
-                .buttonStyle(.borderless)
-                .help(isPreviewExpanded.wrappedValue ? "Collapse preview" : "Expand preview")
+
+                if isInCodeBlock {
+                    storage.addAttributes(self.codeAttributes(), range: lineRange)
+                    return
+                }
+
+                if let headingLevel = self.headingLevel(in: line) {
+                    storage.addAttributes(self.headingAttributes(level: headingLevel), range: lineRange)
+                    let markerRange = NSRange(location: lineRange.location, length: headingLevel)
+                    storage.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: markerRange)
+                    return
+                }
+
+                if trimmedLine.hasPrefix(">") {
+                    storage.addAttributes(self.blockquoteAttributes(), range: lineRange)
+                    self.styleLeadingMarker(in: line, lineRange: lineRange, marker: ">", storage: storage)
+                    return
+                }
+
+                if self.isListLine(trimmedLine) {
+                    self.styleListMarker(in: line, lineRange: lineRange, storage: storage)
+                }
+
+                self.applyInlineStyles(in: line, lineRange: lineRange, storage: storage)
+            }
+
+            storage.endEditing()
+            textView.selectedRanges = selectedRanges
+            isApplyingStyle = false
+        }
+
+        private func baseAttributes() -> [NSAttributedString.Key: Any] {
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.lineSpacing = 4
+            paragraphStyle.paragraphSpacing = 6
+
+            return [
+                .font: NSFont.systemFont(ofSize: 15),
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraphStyle
+            ]
+        }
+
+        private func headingAttributes(level: Int) -> [NSAttributedString.Key: Any] {
+            let size: CGFloat
+            switch level {
+            case 1: size = 30
+            case 2: size = 24
+            case 3: size = 20
+            case 4: size = 17
+            default: size = 15
+            }
+
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.lineSpacing = 4
+            paragraphStyle.paragraphSpacingBefore = level == 1 ? 10 : 6
+            paragraphStyle.paragraphSpacing = 8
+
+            return [
+                .font: NSFont.systemFont(ofSize: size, weight: .bold),
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraphStyle
+            ]
+        }
+
+        private func blockquoteAttributes() -> [NSAttributedString.Key: Any] {
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.firstLineHeadIndent = 12
+            paragraphStyle.headIndent = 12
+            paragraphStyle.lineSpacing = 4
+            paragraphStyle.paragraphSpacing = 6
+
+            return [
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: paragraphStyle
+            ]
+        }
+
+        private func codeAttributes() -> [NSAttributedString.Key: Any] {
+            [
+                .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
+                .foregroundColor: NSColor.labelColor,
+                .backgroundColor: NSColor.quaternaryLabelColor.withAlphaComponent(0.16)
+            ]
+        }
+
+        private func headingLevel(in line: String) -> Int? {
+            let markerCount = line.prefix(while: { $0 == "#" }).count
+            guard (1...6).contains(markerCount) else { return nil }
+            let markerEndIndex = line.index(line.startIndex, offsetBy: markerCount)
+            guard markerEndIndex < line.endIndex, line[markerEndIndex] == " " else { return nil }
+            return markerCount
+        }
+
+        private func isListLine(_ trimmedLine: String) -> Bool {
+            trimmedLine.hasPrefix("- ") ||
+            trimmedLine.hasPrefix("* ") ||
+            trimmedLine.hasPrefix("+ ") ||
+            trimmedLine.hasPrefix("- [ ] ") ||
+            trimmedLine.hasPrefix("- [x] ") ||
+            trimmedLine.hasPrefix("- [X] ") ||
+            trimmedLine.range(of: #"^\d+\. "#, options: .regularExpression) != nil
+        }
+
+        private func styleLeadingMarker(in line: String, lineRange: NSRange, marker: String, storage: NSTextStorage) {
+            guard let markerRange = line.range(of: marker) else { return }
+            let nsRange = NSRange(markerRange, in: line)
+            storage.addAttribute(.foregroundColor, value: NSColor.tertiaryLabelColor, range: offset(nsRange, by: lineRange.location))
+        }
+
+        private func styleListMarker(in line: String, lineRange: NSRange, storage: NSTextStorage) {
+            let markerPatterns = ["^\\s*[-*+] ", "^\\s*- \\[[ xX]\\] ", "^\\s*\\d+\\. "]
+
+            for pattern in markerPatterns {
+                guard let regex = try? NSRegularExpression(pattern: pattern),
+                      let match = regex.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) else {
+                    continue
+                }
+
+                storage.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: offset(match.range, by: lineRange.location))
+                return
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.quaternary.opacity(0.35))
+
+        private func applyInlineStyles(in line: String, lineRange: NSRange, storage: NSTextStorage) {
+            apply(pattern: #"\*\*([^*]+)\*\*"#, attributes: [.font: NSFont.systemFont(ofSize: 15, weight: .semibold)], in: line, lineRange: lineRange, storage: storage)
+            apply(pattern: #"`([^`]+)`"#, attributes: codeAttributes(), in: line, lineRange: lineRange, storage: storage)
+            apply(pattern: #"\[\[([^\]]+)\]\]"#, attributes: [.foregroundColor: NSColor.controlAccentColor, .underlineStyle: NSUnderlineStyle.single.rawValue], in: line, lineRange: lineRange, storage: storage)
+        }
+
+        private func apply(pattern: String, attributes: [NSAttributedString.Key: Any], in line: String, lineRange: NSRange, storage: NSTextStorage) {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
+            let fullLineRange = NSRange(location: 0, length: (line as NSString).length)
+            for match in regex.matches(in: line, range: fullLineRange) {
+                storage.addAttributes(attributes, range: offset(match.range, by: lineRange.location))
+            }
+        }
+
+        private func offset(_ range: NSRange, by location: Int) -> NSRange {
+            NSRange(location: range.location + location, length: range.length)
+        }
     }
 }
+#else
+private struct MarkdownLiveTextEditor: View {
+    @Binding var text: String
+
+    var body: some View {
+        TextEditor(text: $text)
+            .font(.body.monospaced())
+            .scrollContentBackground(.hidden)
+            .padding(.top, 8)
+    }
+}
+#endif
 
 private struct NoteLinkSuggestionMenu: View {
     let suggestions: [Note]
